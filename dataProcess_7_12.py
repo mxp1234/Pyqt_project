@@ -14,6 +14,8 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 import reportlab
 from reportlab.lib.pagesizes import letter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from app_ui import *
 from hypersonic import *
@@ -52,8 +54,7 @@ class dataProcess(QMainWindow,Ui_MainWindow):
         
         #初始化training类，额外独立出training类的目的是能够多线程运行，training类继承qthread
         self.train = training()
-        self.calculate_3d_img = plot3D()
-        self.calculate_table3 = plotTable3()
+        
         self.comboBox_2.setView(QListView())
         self.comboBox_3.setView(QListView())
 
@@ -84,18 +85,14 @@ class dataProcess(QMainWindow,Ui_MainWindow):
         #这下面几个run运行后即显示的信号，并不是类似button和combo的中断触发信号，run即是他们的触发指令
         #run是button click触发的，但run里面有emit，本身又相当于做为信号触发别的绘图函数，像是信号与槽的嵌套
         self.draw_table1_signal.connect(self.draw)
-        self.train.threeDmap_signal.connect(self.calculate_3d_img.caculate_img)
         self.draw_table2_fig1_signal.connect(self.draw_table2_fig1) 
         self.draw_table2_fig2_signal.connect(self.draw_table2_fig2)
-        self.train.draw_weight_and_bias.connect(self.calculate_table3.caculate_img)
         self.neural_start_signal.connect(self.neural_start)
         self.train.update_epoch_loss.connect(self.draw_loss)
         # self.train.finished.connect(self.train_finished)
         self.train.update_iteration_loss.connect(self.show_loss)
         self.train.start_train.connect(self.print_start_train)
         
-        self.calculate_3d_img.plot_3d_data.connect(self.threeDmap)
-        self.calculate_table3.plot_table3.connect(self.draw_table3)
         #偏差默认值
         self.cd_bias = 0.1
         self.cl_bias = 0.1
@@ -138,11 +135,57 @@ class dataProcess(QMainWindow,Ui_MainWindow):
         self.verticalLayout_79 = QtWidgets.QVBoxLayout(self.widget_7)
         self.verticalLayout_79.addWidget(self.cav4)
         self.ui_customize()
+        
+        #处理输入的初始飞行参数,第二个（绝对偏差由于不是按键触发，是即时读取的，也在这里处理）
+        self.input_data = self.input.text()
+        self.goal_data = self.goal.text()
+        
+        #cd_bias2是cd的绝对偏差
+        self.cd_bias2 = self.lineEdit_2.text()
+        self.cl_bias2 = self.lineEdit_3.text()
+        self.cy_bias2 = self.lineEdit_4.text()
+        
+        
+        # 如果输入框为空，则使用默认值,非空，处理成array。[2,2,2,3,4,5]形式
+        if not self.input_data:
+            self.input_data = x0  # 给定默认值
+        else:
+            self.input_data = [eval(item) for item in self.input_data.strip('[]').split(',')]
+            self.input_data = np.array(self.input_data)
+        if not self.goal_data:
+            self.goal_data = x01  # 给定默认值
+        else:
+            self.goal_data = [eval(item) for item in self.goal_data.strip('[]').split(',')]
+            self.goal_data = np.array(self.goal_data)
+            
+        self.input_data = self.input_data.astype(np.float64)
+        self.goal_data = self.goal_data.astype(np.float64)
+        self.cd_bias2 = float(self.cd_bias2)
+        self.cl_bias2 = float(self.cl_bias2)
+        self.cy_bias2 = float(self.cy_bias2)
+        
+        #以上处理自定义参数的逻辑不好，因为需要反复按“校准”按键，会多次读取文件，但是似乎读取文件也不怎么花时间
+        
+        '''
+        input_data 范例： [6/57.3, 1/57.3, 2/57.3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33589, 0, 5000, 0, 0, 0.03, 0, 0]
+        goal_data  范例： [1/57.3,0,0]
+        '''
+        
+        #调用高超模型计算,fly_state是气动表结果，real_states是加了预设的“真实值”，但也是用hypersonic_dobBased_neural算的
 
-    # def add_border(self,ax):
-    #     for spine in ax.spines.values():
-    #         spine.set_edgecolor('black')
-    #         spine.set_linewidth(2)
+        self.fly_states = odeint(hypersonic_dobBased,  self.input_data, tspan , args=(self.goal_data, Pid, z, mu, Vv),atol=1e-7,rtol=1e-6)
+        self.real_states = odeint(hypersonic_dobBased1_numpy_forDrawing, self.input_data, tspan , args=( self.goal_data, Pid, z, mu, Vv ,[[self.cd_bias,self.cd_bias2],[self.cl_bias,self.cl_bias2],[self.cy_bias,self.cy_bias2]],self.ro_bias))
+
+        self.calculate_3d_img = plot3D(self.real_states,self.fly_states,self.input_data,self.goal_data)
+        self.calculate_table3 = plotTable3(self.real_states,self.fly_states,self.input_data,self.goal_data)
+        
+        self.train.threeDmap_signal.connect(self.calculate_3d_img.caculate_img)
+        self.calculate_3d_img.plot_3d_data.connect(self.threeDmap)
+        
+        self.train.draw_weight_and_bias.connect(self.calculate_table3.caculate_img)
+        self.calculate_table3.plot_table3.connect(self.draw_table3)
+        
+        
         
     def whereFile(self):
         self.lineEdit.clear()
@@ -189,45 +232,7 @@ class dataProcess(QMainWindow,Ui_MainWindow):
         self.table1 = self.df_table1.copy()
         self.table2 = self.df_table2.copy()
         
-        #处理输入的初始飞行参数,第二个（绝对偏差由于不是按键触发，是即时读取的，也在这里处理）
-        self.input_data = self.input.text()
-        self.goal_data = self.goal.text()
         
-        #cd_bias2是cd的绝对偏差
-        self.cd_bias2 = self.lineEdit_2.text()
-        self.cl_bias2 = self.lineEdit_3.text()
-        self.cy_bias2 = self.lineEdit_4.text()
-        
-        
-        # 如果输入框为空，则使用默认值,非空，处理成array。[2,2,2,3,4,5]形式
-        if not self.input_data:
-            self.input_data = x0  # 给定默认值
-        else:
-            self.input_data = [eval(item) for item in self.input_data.strip('[]').split(',')]
-            self.input_data = np.array(self.input_data)
-        if not self.goal_data:
-            self.goal_data = x01  # 给定默认值
-        else:
-            self.goal_data = [eval(item) for item in self.goal_data.strip('[]').split(',')]
-            self.goal_data = np.array(self.goal_data)
-            
-        self.input_data = self.input_data.astype(np.float64)
-        self.goal_data = self.goal_data.astype(np.float64)
-        self.cd_bias2 = float(self.cd_bias2)
-        self.cl_bias2 = float(self.cl_bias2)
-        self.cy_bias2 = float(self.cy_bias2)
-        
-        #以上处理自定义参数的逻辑不好，因为需要反复按“校准”按键，会多次读取文件，但是似乎读取文件也不怎么花时间
-        
-        '''
-        input_data 范例： [6/57.3, 1/57.3, 2/57.3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33589, 0, 5000, 0, 0, 0.03, 0, 0]
-        goal_data  范例： [1/57.3,0,0]
-        '''
-        
-        #调用高超模型计算,fly_state是气动表结果，real_states是加了预设的“真实值”，但也是用hypersonic_dobBased_neural算的
-
-        self.fly_states = odeint(hypersonic_dobBased,  self.input_data, tspan , args=(self.goal_data, Pid, z, mu, Vv),atol=1e-7,rtol=1e-6)
-        self.real_states = odeint(hypersonic_dobBased1_numpy_forDrawing, self.input_data, tspan , args=( self.goal_data, Pid, z, mu, Vv ,[[self.cd_bias,self.cd_bias2],[self.cl_bias,self.cl_bias2],[self.cy_bias,self.cy_bias2]],self.ro_bias))
         
         # [6/57.3, 1/57.3, 2/57.3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33589, 0, 5000, 0, 0, 0.03, 0, 0]
         # 滚转，俯仰，偏航，wx，wy，wz，
@@ -294,13 +299,14 @@ class dataProcess(QMainWindow,Ui_MainWindow):
             
     def output_pdf_file(self):
         text = self.plainTextEdit.toPlainText()
-        
+        pdfmetrics.registerFont(TTFont('SimSun', 'SIMSUN.ttf'))
         if((self.train.on_running_flag==False)and(self.train.finished_flag==True)and(text!="")):
             options = QFileDialog.Options()
             fileName,_ = QFileDialog.getSaveFileName(self,"保存文件","","PDF Files (*.pdf);;All Files (*)", options=options)
             if fileName:
                 try:
                     c = canvas.Canvas(fileName, pagesize=letter)
+                    c.setFont('SimSun', 12)
                     width, height = letter
                     text_lines = text.split('\n')
                     for i, line in enumerate(text_lines):
@@ -979,15 +985,13 @@ class training(QThread):
         Force, _, ddx = hypersonic_dobBased1(X_train[:, :21], X_train[:, 20], [1 / 57.3, 0, 0], Pid, z, mu, Vv,
                                          [self.bias[0][0],self.bias[0][1],self.bias[1][0],self.bias[1][1],self.bias[2][0],self.bias[2][1]],self.ro_bais)
         
-        
-        
         self.start_train.emit()
         a1 = time.time()
         weight_and_bias_list_print = [[0.0,0.0],[0.0,0.0],[0.0,0.0]]
         self.on_running_flag = True
         for self.epoch in range(self.epoch_max):
             model.train()
-            for i in range(10):
+            for i in range(2):
 
                 optimizer.zero_grad()
                 #notice: self.look是贝叶斯网络训出来的w1，w2，w3和b1，b2，b3的均值方差
@@ -1002,12 +1006,12 @@ class training(QThread):
                 
                 iteration += 1
                 
-                if iteration % 1 == 0:
+                if iteration % 10 == 0:
                     print(f"Epoch [{self.epoch + 1}/{self.epoch_max}], Total Loss: {self.total_loss.item()}")
                     self.update_iteration_loss.emit(weight_and_bias_list_print)
 
                     
-                if iteration % 50 == 0:
+                if iteration % 100 == 0:
                     print(self.look)
                     
                     self.draw_weight_and_bias.emit(weight_and_bias_list)   #画图
@@ -1075,7 +1079,7 @@ class training(QThread):
         '''
 
 class plot3D(QThread):
-    plot_3d_data = pyqtSignal([list,list,list])
+    plot_3d_data = pyqtSignal(list)
     def __init__(self,real_states,fly_states,input_data,goal_data) -> None:
         super().__init__()
     
@@ -1091,7 +1095,7 @@ class plot3D(QThread):
         self.plot_3d_data.emit([self.data1,self.data2,self.data3])
         
 class plotTable3(QThread):
-    plot_table3 = pyqtSignal([list,list,list])
+    plot_table3 = pyqtSignal(list)
     def __init__(self,real_states,fly_states,input_data,goal_data) -> None:
         super().__init__()
     
